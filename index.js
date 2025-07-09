@@ -79,4 +79,21 @@ app.post('/close/:id', (req, res) => {
   });
 });
 
+app.post('/delete/:id', (req, res) => {
+  db.get('SELECT screenshot FROM bugs WHERE id = ?', [req.params.id], (err, row) => {
+    if (row && row.screenshot) {
+      const filePath = row.screenshot;
+      fs.unlink(filePath, () => {
+        db.run('DELETE FROM bugs WHERE id = ?', [req.params.id], () => {
+          res.redirect('/');
+        });
+      });
+    } else {
+      db.run('DELETE FROM bugs WHERE id = ?', [req.params.id], () => {
+        res.redirect('/');
+      });
+    }
+  });
+});
+
 app.listen(3000, () => console.log('Bug tracker running at http://localhost:3000'));
