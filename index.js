@@ -1,19 +1,24 @@
+require('dotenv').config();
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const bodyParser = require('body-parser');
 const path = require('path');
 const multer = require('multer');
 const fs = require('fs');
 
 const app = express();
-const db = new sqlite3.Database(':memory:');
 
+
+// Используйте DATABASE_URL для подключения к Render PostgreSQL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 const uploadDir = path.join(__dirname, 'public', 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
-
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -32,68 +37,79 @@ app.set('views', path.join(__dirname, 'views'));
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-db.serialize(() => {
-  db.run(`CREATE TABLE bugs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT,
-    status TEXT DEFAULT 'open',
-    screenshot TEXT
-  )`);
-});
+// Создание таблицы, если не существует
+(async () => {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS bugs (
+      id SERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT DEFAULT 'open',
+      screenshot TEXT
+    )
+  `);
+})();
 
-app.get('/', (req, res) => {
-  db.all('SELECT * FROM bugs', (err, rows) => {
+app.get('/', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM bugs ORDER BY id DESC');
     rows.forEach(bug => {
       if (bug.screenshot) {
         bug.screenshot = '/uploads/' + path.basename(bug.screenshot);
       }
     });
     res.render('index', { bugs: rows });
-  });
+  } catch (err) {
+    res.status(500).send('Ошибка подключения к базе данных');
+  }
 });
 
 app.get('/new', (req, res) => {
   res.render('new');
 });
 
-
-app.post('/new', upload.single('screenshot'), (req, res) => {
+app.post('/new', upload.single('screenshot'), async (req, res) => {
   const { title, description } = req.body;
   let screenshotPath = null;
   if (req.file) {
     screenshotPath = req.file.path;
   }
-  db.run(
-    'INSERT INTO bugs (title, description, screenshot) VALUES (?, ?, ?)',
-    [title, description, screenshotPath],
-    () => {
-      res.redirect('/');
-    }
-  );
-});
-
-app.post('/close/:id', (req, res) => {
-  db.run('UPDATE bugs SET status = ? WHERE id = ?', ['closed', req.params.id], () => {
+  try {
+    await pool.query(
+      'INSERT INTO bugs (title, description, screenshot) VALUES ($1, $2, $3)',
+      [title, description, screenshotPath]
+    );
     res.redirect('/');
-  });
+  } catch (err) {
+    res.status(500).send('Ошибка при добавлении бага');
+  }
 });
 
-app.post('/delete/:id', (req, res) => {
-  db.get('SELECT screenshot FROM bugs WHERE id = ?', [req.params.id], (err, row) => {
-    if (row && row.screenshot) {
-      const filePath = row.screenshot;
+app.post('/close/:id', async (req, res) => {
+  try {
+    await pool.query('UPDATE bugs SET status = $1 WHERE id = $2', ['closed', req.params.id]);
+    res.redirect('/');
+  } catch (err) {
+    res.status(500).send('Ошибка при закрытии бага');
+  }
+});
+
+app.post('/delete/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT screenshot FROM bugs WHERE id = $1', [req.params.id]);
+    if (rows.length && rows[0].screenshot) {
+      const filePath = rows[0].screenshot;
       fs.unlink(filePath, () => {
-        db.run('DELETE FROM bugs WHERE id = ?', [req.params.id], () => {
-          res.redirect('/');
-        });
+        pool.query('DELETE FROM bugs WHERE id = $1', [req.params.id])
+          .then(() => res.redirect('/'))
+          .catch(() => res.status(500).send('Ошибка при удалении бага'));
       });
     } else {
-      db.run('DELETE FROM bugs WHERE id = ?', [req.params.id], () => {
-        res.redirect('/');
-      });
+      await pool.query('DELETE FROM bugs WHERE id = $1', [req.params.id]);
+      res.redirect('/');
     }
-  });
+  } catch (err) {
+    res.status(500).send('Ошибка при удалении бага');
+  }
 });
 
-app.listen(3000, () => console.log('Bug tracker running at http://localhost:3000'));
